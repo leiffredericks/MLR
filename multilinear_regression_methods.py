@@ -94,7 +94,11 @@ def MLR_set(X, y, method='OLS', detrend=True, standardize=True,  weights=None, c
     ## Post-processing partial derivatives / coefficients
     ############################################################################################################################
 
-    # First rescale the solution by the training variances to return to nominal units
+    # First incorporate weights, since the raw solution expects weighted X
+    if weights is not None:
+        dy_dX           = dy_dX*weights 
+
+    # Second rescale the solution by the training variances to return to nominal units
     if standardize:
         # Save the sigma-unit solution before rescaling 
         dynorm_dXnorm   = dy_dX
@@ -107,7 +111,7 @@ def MLR_set(X, y, method='OLS', detrend=True, standardize=True,  weights=None, c
         else:
             dy_dX       = dy_dX * np.std(y_orig,axis=0) / np.std(X_orig,axis=0)        
 
-    # Second calibrate to recreate the correct variance 
+    # Third calibrate to recreate the correct variance 
     if calibrate:
         # If we are given a different variance to target
         if calibration_X is not None and calibration_y is not None:
