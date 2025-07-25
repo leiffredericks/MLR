@@ -10,11 +10,18 @@ from sklearn.linear_model import ElasticNet
 from sklearn.linear_model import Ridge
 from sklearn.cross_decomposition import PLSRegression
 
-
+# # This will help with development:
+# del(MLR_CV)
+# del(MLR_set)
+# import importlib
+# import multilinear_regression_methods
+# importlib.reload(multilinear_regression_methods)
+# from multilinear_regression_methods import *
 
 
 def MLR_set(X, y, method='OLS', detrend=True, standardize=True,  weights=None, calibrate=True, calibration_X = None, calibration_y = None, 
-            fit_intercept=False, EN_selection='random', ridge_solver='svd', l1_ratio=0.5, alpha=1, n_PLS_components=5, return_dynorm_dxnorm=False, random_seed=42):
+            fit_intercept=False, EN_selection='random', ridge_solver='svd', l1_ratio=0.5, alpha=1, n_PLS_components=5, scale_PLS=True,
+            return_dynorm_dxnorm=False, random_seed=42):
     ############################################################################################################################
     ## Pre-processing the X matrix and y vector
     ############################################################################################################################
@@ -35,13 +42,21 @@ def MLR_set(X, y, method='OLS', detrend=True, standardize=True,  weights=None, c
     
     # Standardize both X and y data (even though it doesn't matter for fitting in y, just make everything units of sigma)
     if standardize:
-        X   = (X - X.mean(axis=0)) / X.std(axis=0)
-        y   = (y - y.mean(axis=0)) / y.std(axis=0)
-        
-    # If weights for X are included (predictor weights), weight the X variable
-    if weights is not None:
-        X   = X*weights    
+        X_std   = X.std(axis=0)
+        y_std   = y.std(axis=0)
 
+        # Avoid dividing by 0 if no variance in data
+        X_std[X_std == 0] = 1
+        if y_std == 0:
+            y_std = 1
+        
+        X   = (X - X.mean(axis=0)) / X_std
+        y   = (y - y.mean(axis=0)) / y_std
+
+    # If weights for X are included (predictor weights), weight the X variable, only matters for MCA and PLS
+    if (weights is not None) and (method=='MCA' or method=='PLS'):
+        X   = X*weights    
+        
     ############################################################################################################################
     ## Methods implementations
     ############################################################################################################################
@@ -82,7 +97,7 @@ def MLR_set(X, y, method='OLS', detrend=True, standardize=True,  weights=None, c
         dy_dX   = clf.coef_
 
     elif method == 'PLS':
-        pls_opt = PLSRegression(n_components=n_PLS_components)
+        pls_opt = PLSRegression(n_components=n_PLS_components, scale=scale_PLS)
         pls_opt.fit(X, y)
         dy_dX   = pls_opt.coef_[0]
         
@@ -94,24 +109,25 @@ def MLR_set(X, y, method='OLS', detrend=True, standardize=True,  weights=None, c
     ## Post-processing partial derivatives / coefficients
     ############################################################################################################################
 
-    # First incorporate weights, since the raw solution expects weighted X
-    if weights is not None:
-        dy_dX           = dy_dX*weights 
-
-    # Second rescale the solution by the training variances to return to nominal units
+    # First rescale the solution by the training variances to return to nominal units
     if standardize:
         # Save the sigma-unit solution before rescaling 
         dynorm_dXnorm   = dy_dX
 
         # If we are given a different unit variance to target
         if calibration_X is not None and calibration_y is not None:
-            dy_dX       = dy_dX * np.std(calibration_y,axis=0) / np.std(calibration_X,axis=0)
+            # Avoid dividing by 0 if no variance in data
+            calibration_X_std   = np.std(calibration_X,axis=0)
+            calibration_X_std[calibration_X_std == 0] = 1
+
+            dy_dX       = dy_dX * np.std(calibration_y,axis=0) / calibration_X_std
 
         # Otherwise rescale to training variance to retrieve original units
         else:
-            dy_dX       = dy_dX * np.std(y_orig,axis=0) / np.std(X_orig,axis=0)        
+            dy_dX       = dy_dX * np.std(y_orig,axis=0) / X_std      
+    
 
-    # Third calibrate to recreate the correct variance 
+    # Second calibrate to recreate the correct variance 
     if calibrate:
         # If we are given a different variance to target
         if calibration_X is not None and calibration_y is not None:
@@ -130,8 +146,9 @@ def MLR_set(X, y, method='OLS', detrend=True, standardize=True,  weights=None, c
     
 def MLR_CV(X, y, method='OLS', detrend=True, standardize=True,  weights=None, calibrate=True, calibration_X = None, calibration_y = None, 
             cross_validation='resample_split', folds=5, n_resamples=10, resample_train_fraction=0.8, bounds=None, x0=None, 
-            loss_func=None, tol=None, solver='Nelder-Mead', return_xVals=False, max_PLS_components=25, plot_PLS=False,
-            fit_intercept=False, EN_selection='random', ridge_solver='svd', l1_ratio=0.5, alpha=1, n_PLS_components=5, return_dynorm_dxnorm=False, random_seed=42):
+            loss_func=None, tol=None, solver='Nelder-Mead', return_xVals=False, max_PLS_components=25, plot_PLS=False, scale_PLS=True,
+            fit_intercept=False, EN_selection='random', ridge_solver='svd', l1_ratio=0.5, alpha=1, n_PLS_components=5, 
+            return_dynorm_dxnorm=False, verbose=False, random_seed=42):
     
     # If provide one calibration, make sure both are provided
     if (calibration_X is None) ^ (calibration_y is None):
@@ -144,7 +161,7 @@ def MLR_CV(X, y, method='OLS', detrend=True, standardize=True,  weights=None, ca
         # Default is RMSE
         def loss_func(dy_dX,X,y): return np.sqrt(np.mean((y-dy_dX@X.T)**2)) 
 
-    # Define this outside the loop, after detrending
+    # Define this outside the loop
     def hyper_RIDGE(x, X_train, y_train, X_test, y_test):
         # Loss function vs alpha is smoother in log space
         alpha_here                  = 10**x[0]
@@ -159,7 +176,7 @@ def MLR_CV(X, y, method='OLS', detrend=True, standardize=True,  weights=None, ca
 
         return loss
     
-    # Define this outside the loop, after detrending
+    # Define this outside the loop
     def hyper_EN_RIDGE(x, X_train, y_train, X_test, y_test):
         # Loss function vs alpha is smoother in log space
         alpha_here                  = 10**x[0] 
@@ -229,6 +246,8 @@ def MLR_CV(X, y, method='OLS', detrend=True, standardize=True,  weights=None, ca
 
     # Cycle through train/test splits 
     for i in np.arange(n_cycles):
+        if verbose:
+            print(f'Cross validation loop #{i}')
 
         # How we select our mini train and mini test if we are randomly resampling
         if cross_validation == 'resample_split':
@@ -265,6 +284,7 @@ def MLR_CV(X, y, method='OLS', detrend=True, standardize=True,  weights=None, ca
                 dy_dX_here  = MLR_set(mini_train_X, mini_train_y, method='PLS', n_PLS_components=np.int32(j+1), return_dynorm_dxnorm=False,
                                     detrend=detrend, standardize=standardize,  weights=weights, calibrate=calibrate, 
                                     calibration_X=calibration_X, calibration_y=calibration_y, fit_intercept=fit_intercept, 
+                                    scale_PLS=scale_PLS,
                                     EN_selection=EN_selection, ridge_solver=ridge_solver, l1_ratio=l1_ratio, alpha=alpha, random_seed=random_seed)
                 scores[j]   = loss_func(dy_dX_here, mini_test_X, mini_test_y)
 
@@ -278,11 +298,13 @@ def MLR_CV(X, y, method='OLS', detrend=True, standardize=True,  weights=None, ca
                 xVals[i], xVals_norm[i] = MLR_set(X, y, method='PLS', n_PLS_components=n_best, return_dynorm_dxnorm=return_dynorm_dxnorm,
                                         detrend=detrend, standardize=standardize,  weights=weights, calibrate=calibrate, 
                                         calibration_X=calibration_X, calibration_y=calibration_y, fit_intercept=fit_intercept, 
+                                        scale_PLS=scale_PLS,
                                         EN_selection=EN_selection, ridge_solver=ridge_solver, l1_ratio=l1_ratio, alpha=alpha, random_seed=random_seed)
             else:
                 xVals[i]                = MLR_set(X, y, method='PLS', n_PLS_components=n_best, return_dynorm_dxnorm=return_dynorm_dxnorm,
                                         detrend=detrend, standardize=standardize,  weights=weights, calibrate=calibrate, 
-                                        calibration_X=calibration_X, calibration_y=calibration_y, fit_intercept=fit_intercept, 
+                                        calibration_X=calibration_X, calibration_y=calibration_y, fit_intercept=fit_intercept,
+                                        scale_PLS=scale_PLS, 
                                         EN_selection=EN_selection, ridge_solver=ridge_solver, l1_ratio=l1_ratio, alpha=alpha, random_seed=random_seed)
 
             if plot_PLS:
